@@ -1,0 +1,29 @@
+method: "flow_matching"
+use_gpu: True
+
+data:
+  flip: True
+
+model:
+  name: "UNet"
+  init_channels: 64
+  t_embedding_dim: 256
+
+training:
+  seed: 42
+  batch_size: 256
+  lr: 1e-3
+  weight_decay: 0.0
+  epochs: 5
+  channels_last: True
+  compile: False
+  autocast_bf16: True
+
+  log_interval: 20
+  log_image_num: 100
+  log_image_interval: 100
+  log_image_steps: 100
+  save_interval: 250
+
+paths:
+  checkpoint_dir: './m2/checkpoints'
