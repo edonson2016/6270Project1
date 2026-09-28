@@ -9,16 +9,14 @@ Including the IL ion inventory means charges and bracket atoms appear during
 pretraining, so the IL fine-tune is not introducing them cold.
 """
 from __future__ import annotations
-import argparse, json, time
+import argparse, time
 from pathlib import Path
 import numpy as np, torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 import sys; sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fm.il_pipeline import LatentAE
-
-MODEL = "seyonec/ChemBERTa-zinc-base-v1"
-DATA = Path("data")
+from fm.il_io import DATA, load_tokenizer
 
 
 def tokenize(smiles, tok, max_len):
@@ -37,13 +35,18 @@ def main():
     p.add_argument("--hidden", type=int, default=512)
     p.add_argument("--max-len", type=int, default=80)
     p.add_argument("--word-dropout", type=float, default=0.25)
+    p.add_argument("--tokenizer", default="bpe", choices=["bpe", "selfies"],
+                   help="decoder target vocabulary. 'selfies' makes every output a "
+                        "valid molecule by construction, removing the parse-failure "
+                        "term that is 74%% of the decoder ceiling loss (docs 6.17).")
+    p.add_argument("--selfies-vocab", default="data/selfies_vocab.json")
     p.add_argument("--out", default="runs/il/pretrain")
     a = p.parse_args()
 
     dev = torch.device("cpu"); torch.manual_seed(0)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(MODEL)
+    tok = load_tokenizer(a.tokenizer, a.selfies_vocab)
+    print(f"tokenizer {a.tokenizer}  vocab {tok.vocab_size}", flush=True)
     PAD, BOS, EOS = tok.pad_token_id, tok.bos_token_id, tok.eos_token_id
 
     E, S = [], []

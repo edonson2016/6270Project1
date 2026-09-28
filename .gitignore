@@ -1,7 +1,15 @@
 .venv/
 wandb/
-runs/
 data/
 __pycache__/
 *.pyc
 .vscode/
+py2opsin_temp_input.txt
+
+docs/
+
+# runs/: ignore everything (checkpoints, logs, result dumps) except the lightweight
+# summary figures. Directories are un-ignored so the negations can reach files inside.
+runs/**
+!runs/**/
+!runs/**/*.png

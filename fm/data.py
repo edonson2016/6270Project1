@@ -111,3 +111,44 @@ def unpack_batch(batch, has_cond: bool, paired: bool):
         x1, y = batch
         return x1, y, None
     return batch, None, None
+
+
+class CFGVectorDataset(Dataset):
+    """Unpaired data with classifier-free-guidance label dropout.
+
+    CFG needs one network to learn both p(x|y) and p(x), so a fraction of the
+    conditional examples are shown with the label replaced by a null token. Here
+    the conditioning vector is [value, mask]: a labelled example is
+    [y_standardized, 1] and the null token is [0, 0].
+
+    The mask channel is not optional. After standardizing y, the value 0 IS the
+    mean melting point, so a bare zero vector would be indistinguishable from
+    "an average IL" rather than "no information". With the mask, and because
+    cond_embed carries biases, [0,0] maps to a learned null embedding.
+
+    A corpus where only some rows are labelled falls out naturally: unlabelled
+    rows carry mask 0 permanently and train only the unconditional branch, while
+    labelled rows are dropped to null with probability `p_uncond`. Both branches
+    therefore see every latent the flow is supposed to model.
+    """
+
+    def __init__(self, x1, y_value, y_mask, p_uncond: float = 0.15,
+                 seed: int = 0) -> None:
+        self.x1 = torch.as_tensor(np.asarray(x1), dtype=torch.float32)
+        self.v = torch.as_tensor(np.asarray(y_value), dtype=torch.float32).view(-1)
+        self.m = torch.as_tensor(np.asarray(y_mask), dtype=torch.float32).view(-1)
+        if not (len(self.v) == len(self.m) == len(self.x1)):
+            raise ValueError("x1, y_value and y_mask must have the same length")
+        self.p_uncond = float(p_uncond)
+        self.g = torch.Generator().manual_seed(seed)
+
+    def __len__(self) -> int:
+        return len(self.x1)
+
+    def __getitem__(self, i: int):
+        keep = self.m[i] > 0
+        if keep and self.p_uncond > 0:
+            keep = bool(torch.rand(1, generator=self.g).item() >= self.p_uncond)
+        y = (torch.stack([self.v[i], torch.ones(())]) if keep
+             else torch.zeros(2))
+        return self.x1[i], y

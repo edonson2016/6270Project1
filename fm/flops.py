@@ -38,9 +38,40 @@ def embedding_flops(module: nn.Embedding, batch: int, seq_len: int) -> int:
     return 0  # a lookup, not arithmetic
 
 
+def conv1d_flops(model: nn.Module, batch: int = 1) -> int:
+    """Conv1d FLOPs, measured with hooks on one dummy forward.
+
+    A Conv1d's cost depends on its output length, which is only known at run time,
+    so this needs a model exposing `data_dim` and the (x, t) velocity interface.
+    """
+    import torch
+    convs = [m for m in model.modules() if isinstance(m, nn.Conv1d)]
+    if not convs:
+        return 0
+    total, hooks = [0], []
+
+    def hook(m, inp, out):
+        k = m.kernel_size[0] * m.in_channels // m.groups
+        total[0] += 2 * k * m.out_channels * out.shape[-1] * batch
+
+    for m in convs:
+        hooks.append(m.register_forward_hook(hook))
+    try:
+        p = next(model.parameters())
+        with torch.no_grad():
+            model(torch.zeros(1, model.data_dim, device=p.device),
+                  torch.zeros(1, device=p.device),
+                  *([torch.zeros(1, model.cond_dim, device=p.device)]
+                    if getattr(model, "cond_dim", 0) else []))
+    finally:
+        for h in hooks:
+            h.remove()
+    return total[0]
+
+
 def forward_flops(model: nn.Module, batch: int = 1, seq_len: int = 1) -> int:
-    """Sum forward FLOPs over the modules we care about."""
-    total = 0
+    """Sum forward FLOPs over the modules we care about (Linear, GRU, Conv1d)."""
+    total = conv1d_flops(model, batch)
     for m in model.modules():
         if isinstance(m, nn.Linear):
             # Linear layers inside a sequence model apply at every position.

@@ -23,10 +23,8 @@ import numpy as np, torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fm import FlowMatching, DDPM, Standardizer, VelocityMLP, sample
-from fm.il_pipeline import LatentAE
 from fm.il_eval import make_splits, make_splits_extended, sliced_w2
-
-DATA = Path("data"); MODEL = "seyonec/ChemBERTa-zinc-base-v1"
+from fm.il_io import DATA, RESULTS, encode_all, load_ae, load_emb, load_ils, load_tokenizer, write_json
 
 
 def main() -> None:
@@ -38,17 +36,16 @@ def main() -> None:
     p.add_argument("--out", default="runs/il/results/ood_matched.json")
     a = p.parse_args()
 
-    from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(MODEL)
+    tok = load_tokenizer()
     dev = torch.device("cpu")
 
-    rows = [json.loads(l) for l in open("runs/il/results/results.jsonl")]
+    rows = [json.loads(l) for l in open(RESULTS / "results.jsonl")]
     by_tag = {}
     for r in rows:                       # a __sampler suffix shares one trained model
         by_tag.setdefault(r["tag"].split("__")[0], r)
 
     ood_all = json.loads((DATA/"il_ood_pairs.json").read_text())
-    E_ood = torch.from_numpy(np.load(DATA/"il_emb_ood.npy")).float()
+    E_ood = load_emb("il_emb_ood.npy")
     held = {q["pair"] for q in json.loads((DATA/"il_ood_pairs_v4.json").read_text())}
     ho_idx = [i for i, q in enumerate(ood_all) if q["pair"] in held]
     print(f"reference clouds: all {len(ood_all)}, held-out {len(ho_idx)}\n", flush=True)
@@ -59,21 +56,16 @@ def main() -> None:
         r = by_tag[tag]; D = r["latent_dim"]
         torch.manual_seed(0)
 
-        ck = torch.load(aep, map_location=dev, weights_only=False)
-        m = LatentAE(768, D, tok.vocab_size, 80, decoder=r["decoder"], hidden=512,
-                     pad_id=tok.pad_token_id)
-        m.load_state_dict(ck["model"]); m.eval()
+        m = load_ae(aep, D, tok, 80, dev, decoder=r["decoder"])
 
         stem = r.get("corpus") or "il_pairs_v2"
-        ils = json.loads((DATA/f"{stem}.json").read_text())
+        ils = load_ils(stem)
         esuf = "" if stem == "il_pairs_v2" else "_" + stem.rsplit("_", 1)[-1]
-        E = torch.from_numpy(np.load(DATA/f"il_emb_ils{esuf}.npy")).float()
+        E = load_emb(f"il_emb_ils{esuf}.npy")
         n0 = r.get("n_original") or (4790 if esuf else 0)
         sp = (make_splits_extended(ils, n0) if n0 else make_splits(ils))
 
-        with torch.no_grad():
-            Z = torch.cat([m.encode(E[i:i+512]) for i in range(0, len(E), 512)])
-            Zo = torch.cat([m.encode(E_ood[i:i+512]) for i in range(0, len(E_ood), 512)])
+        Z, Zo = encode_all(m, E), encode_all(m, E_ood)
 
         # the flow was standardized against its own training cloud, upweighting included
         Ztr = Z[torch.from_numpy(sp["train"]).long()]
@@ -112,8 +104,7 @@ def main() -> None:
         print(f"{'':22} random {len(ho_idx)}-subsets: {np.mean(sub):.3f} +/- {np.std(sub):.3f}"
               f"  (finite-sample inflation {np.mean(sub)-all_n:+.3f})\n", flush=True)
 
-    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(a.out).write_text(json.dumps(out, indent=1))
+    write_json(a.out, out)
     print(f"-> {a.out}")
 
 
