@@ -1,6 +1,6 @@
 """Components for the ionic-liquid latent flow matching pipeline.
 
-Architecture (see docs/IL_EXPERIMENT.md for the full rationale):
+Architecture:
 
     SMILES -> [frozen ChemBERTa] -> mean-pool e (768)
            -> MLP_down -> z (d)           <- flow matching lives HERE

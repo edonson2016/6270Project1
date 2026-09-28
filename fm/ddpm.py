@@ -114,7 +114,8 @@ class DDPM(nn.Module):
     @torch.no_grad()
     def sample(self, n: int, shape: tuple[int, ...], y: Tensor | None = None,
                device=None, sampler: str = "ancestral", n_steps: int | None = None,
-               eta: float = 0.0, clip_x0: float | None = None) -> Tensor:
+               eta: float = 0.0, clip_x0: float | None = None,
+               guide_w: float = 1.0) -> Tensor:
         """Draw samples.
 
         sampler="ancestral": the original DDPM reverse chain, T network
@@ -125,6 +126,11 @@ class DDPM(nn.Module):
 
         Both are written in the predict-x0 form, which is algebraically identical
         to the eps form but exposes the one knob that matters numerically:
+
+        `guide_w` applies classifier-free guidance to the eps prediction:
+        eps_un + w * (eps_cond - eps_un), evaluated as one doubled batch. w = 1 is
+        plain conditional sampling and costs T evaluations; w != 1 costs 2T, which
+        n_function_evals does NOT know about -- the caller must double it.
 
         `clip_x0` clamps the predicted x0 to +/- that many units before taking
         the posterior mean (Ho et al. do this for images with a [-1,1] range).
@@ -145,7 +151,12 @@ class DDPM(nn.Module):
 
         for n_i, i in enumerate(steps):
             it = torch.full((n,), i, device=device, dtype=torch.long)
-            eps = self.forward(x, it, y)
+            if y is not None and guide_w != 1.0:
+                e_un, e_co = self.forward(torch.cat([x, x]), torch.cat([it, it]),
+                                          torch.cat([torch.zeros_like(y), y])).chunk(2, 0)
+                eps = e_un + guide_w * (e_co - e_un)
+            else:
+                eps = self.forward(x, it, y)
             a_i = self.abar[i]
             x0_pred = (x - (1.0 - a_i).clamp_min(1e-20).sqrt() * eps) / a_i.clamp_min(1e-20).sqrt()
             if clip_x0 is not None:
