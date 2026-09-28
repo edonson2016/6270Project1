@@ -9,31 +9,42 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 import torchvision
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+from sklearn.mixture import GaussianMixture
 
+from m2 import flow_matching_losses
 from m2.dataset import CifarDS
 from m2.model import UNet
-
-# Fix for cleanfid conflict
-import scipy.linalg
-
-_orig_sqrtm = scipy.linalg.sqrtm
-def _sqrtm_compat(A, disp=True, **kwargs):
-    X = _orig_sqrtm(A, **kwargs)
-    return X if disp else (X, None)
-scipy.linalg.sqrtm = _sqrtm_compat
+from m2.flow_matching_eval import eval_samples
 
 
-def draw_samples(x):
-    x0 = torch.randn_like(x)
-    t = torch.rand(x0.shape[0], device=x0.device)
-    xt = (1 - t[:, None, None, None]) * x0 + t[:, None, None, None] * x
-    ut = x - x0 
-    return xt, t, ut
-    
+def pretrain_gmm(dl, config):
+    xs, n = [], 0
+    for x, _ in dl:
+        xs.append(x.flatten(1).float().cpu())
+        n += x.shape[0]
+        if n >= config.gmm.num_fit_samples:
+            break
+    X = torch.cat(xs)[:config.gmm.num_fit_samples].numpy()
+
+    gmm = GaussianMixture(
+        n_components=config.gmm.components,
+        covariance_type='diag',
+        random_state=config.training.seed,
+    )
+    gmm.fit(X)
+    return {
+        'means': torch.from_numpy(gmm.means_).float(),
+        'vars': torch.from_numpy(gmm.covariances_).float(),
+        'weights': torch.from_numpy(gmm.weights_).float(),
+    }
+
+
 def train_loop(
         epoch,
         config,
         model: torch.nn.Module,
+        ema,
         opt: torch.optim.Optimizer,
         dl,
         device,
@@ -48,15 +59,17 @@ def train_loop(
     for i, (x, y) in enumerate(dl):
         i_tot = i + epoch * len(dl)
         model.train()
-        xt, t, ut = draw_samples(x)
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=config.training.autocast_bf16):
-                vt = model(xt, t)
 
         opt.zero_grad()
-        l = F.mse_loss(vt.float(), ut)
+        l = flow_matching_losses.loss_method_dict[config.loss.type](x, model, device, config)
         l.backward()
-        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_gradient_norm)
         opt.step()
+        if ema is not None:
+            ema.update_parameters(model)
+            eval_model = ema
+        else:
+            eval_model = model
 
         n += 1
         loss_sum += l.detach()
@@ -79,11 +92,10 @@ def train_loop(
             loss_sum.zero_(); gn_sum.zero_(); gn_max.zero_()
 
         if i_tot % config.training.log_image_interval == 0:
-            run_name = f"{config.method}_{config.model.name}_seed{config.training.seed}"
-            image_path = Path(config.paths.checkpoint_dir) / run_name / 'images' / f'step_{i_tot}.png'
+            image_path = Path(config.paths.checkpoint_dir) / config.name / 'images' / f'step_{i_tot}.png'
             image_path.parent.mkdir(parents=True, exist_ok=True)
 
-            samples = eval_samples(model, noise, config.training.log_image_steps)
+            samples = eval_samples(eval_model, noise, config.training.log_image_steps)
             imgs = (samples.float().clamp(-1, 1) + 1) / 2                   # to [0, 1]
             grid = torchvision.utils.make_grid(imgs, nrow=10, padding=2, pad_value=1.0)
             grid = (grid * 255).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()   # HWC uint8
@@ -91,16 +103,16 @@ def train_loop(
 
             img = Image.fromarray(grid)
             img.save(image_path)
-            model.train()
 
         if i_tot % config.training.save_interval == 0:
-            run_name = f"{config.method}_{config.model.name}_seed{config.training.seed}"
-            ckpt_path = Path(config.paths.checkpoint_dir) / run_name / f'ckpt_{i_tot}.pt'
+            ckpt_path = Path(config.paths.checkpoint_dir) / config.name / f'ckpt_{i_tot}.pt'
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
+            ema_state_dict = ema.module.state_dict() if ema is not None else None
             print(f"Saving to {ckpt_path}")
             ckpt = {
                 "model": model.state_dict(),
+                "ema": ema_state_dict,
                 "opt": opt.state_dict(),
                 "i_tot": i_tot,
                 "rng_cpu": torch.get_rng_state(),
@@ -108,20 +120,16 @@ def train_loop(
             }
             torch.save(ckpt, ckpt_path)
 
-def eval_samples(model, noise, sample_steps):
-    model.eval()
-    with torch.no_grad():
-        x = noise.clone()
-        for step in range(sample_steps):
-            x += model(x, torch.full((x.shape[0],), step / sample_steps, device=x.device)) / sample_steps
-        return x
     
-def train_fm(config_path):
+def train_fm(config_path, added_config_path=None):
     # Configure wandb
     config = OmegaConf.load(config_path)
-    run_name = f"{config.method}_{config.model.name}_seed{config.training.seed}"
+    if added_config_path is not None:
+        added_config = OmegaConf.load(added_config_path)
+        config = OmegaConf.merge(config, added_config) # latter overrides
+
     run = wandb.init(
-        name=run_name,
+        name=config.name,
         entity="cis6270",
         project="project1-modality2",
         tags=[config.method, 'train'],
@@ -147,6 +155,12 @@ def train_fm(config_path):
         model = model.to(device, memory_format=torch.channels_last)
     else:
         model = model.to(device)
+    if config.training.use_ema:
+        ema = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(config.training.ema_decay), use_buffers=True)
+        ema.requires_grad_(False)
+    else:
+        ema = None
+    
     if config.training.compile:
         model.compile()
     noise = torch.randn(config.training.log_image_num, 3, 32, 32, device=device)
@@ -154,67 +168,15 @@ def train_fm(config_path):
     opt = torch.optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=config.training.weight_decay)
 
     for i in range(config.training.epochs):
-        train_loop(i, config, model, opt, dl, device, noise)
+        train_loop(i, config, model, ema, opt, dl, device, noise)
     wandb.finish()
 
-
-def eval_fm(train_config_path, eval_config_path):
-    train_config = OmegaConf.load(train_config_path)
-    eval_config = OmegaConf.load(eval_config_path)
-    config = OmegaConf.merge(train_config, eval_config)
-
-    run_name = f"{config.method}_{config.model.name}_seed{config.training.seed}"
-    run = wandb.init(
-        name=f"eval_{run_name}",
-        entity="cis6270",
-        project="project1-modality2",
-        tags=[config.method, 'eval'],
-        config=config,
-    )
-
-    # Assign device and seed
-    if config.use_gpu and torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-    torch.random.manual_seed(config.eval.seed)
-
-    # Create model
-    if config.model.name == 'UNet':
-        model = UNet(init_ch=config.model.init_channels, emb_dim=config.model.t_embedding_dim)
-    ckpt_path = Path(config.paths.checkpoint_dir) / run_name / f'ckpt_{config.eval.checkpoint_step}.pt'
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt['model'])
-    if config.training.channels_last:
-        model = model.to(device, memory_format=torch.channels_last)
-    else:
-        model = model.to(device)
-
-    def generator(z):
-        batch_size = z.shape[0]
-        noise = torch.randn((batch_size, 3, 32, 32), device=device)
-        samples = eval_samples(model, noise, config.eval.sample_steps)
-        pix_vals = (samples.float().clamp(-1, 1) + 1) / 2
-        return (pix_vals * 255).round().to(torch.uint8)
-
-    fid_score = fid.compute_fid(
-        gen=generator,
-        dataset_name='cifar10',
-        dataset_res=32,
-        dataset_split='train',
-        num_gen=config.eval.num_gen,
-        batch_size=config.eval.batch_size,
-        device=device
-    )
-    wandb.log({"fid_score": fid_score})
-
-    wandb.finish()
 
 
 
 if __name__ == '__main__':
     train_fm('./m2/configs/base_train_fm.yaml')
-    # eval_fm('./m2/configs/base_train_fm.yaml', './m2/configs/base_eval_fm.yaml')
+
 
 
 

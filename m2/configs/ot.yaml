@@ -1,0 +1,4 @@
+name: "fm_ot"
+
+loss:
+  type: "ot"

@@ -1,0 +1,8 @@
+name: "fm_gmm"
+
+loss:
+  type: "gmm"
+
+gmm:
+  components: 10
+  num_fit_samples: 20000

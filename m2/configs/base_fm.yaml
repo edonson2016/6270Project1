@@ -1,0 +1,42 @@
+name: "fm_ema"
+method: "flow_matching"
+use_gpu: True
+
+data:
+  flip: True
+
+model:
+  name: "UNet"
+  init_channels: 128
+  t_embedding_dim: 256
+
+training:
+  seed: 42
+  batch_size: 256
+  lr: 1e-4
+  weight_decay: 0.0
+  epochs: 50
+  max_gradient_norm: 0.5
+
+  channels_last: True
+  compile: True
+  autocast_bf16: True
+
+  use_ema: True
+  ema_decay: 0.999
+
+  log_interval: 20
+  log_image_interval: 200
+  log_image_num: 100
+  log_image_steps: 40
+  save_interval: 500
+
+eval: 
+  seed: 0
+  num_gen: 50000
+  batch_size: 256
+  checkpoint_step: 10000
+  sample_steps: 50
+
+paths:
+  checkpoint_dir: './m2/checkpoints'

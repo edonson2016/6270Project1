@@ -1,0 +1,5 @@
+training:
+  batch_size: 128 # Gets doubled by the xt_neg samples
+
+tpc:
+  lambda_: 0.25

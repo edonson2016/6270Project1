@@ -28,7 +28,7 @@ class ResBlock(nn.Module):
             if in_channels == out_channels:   
                 self.shortcut = nn.Identity()
             else:
-                self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+                self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
         self.block1 = nn.Sequential(
             nn.GroupNorm(16, in_channels), 
@@ -53,6 +53,24 @@ class ResBlock(nn.Module):
         return x_res + self.block2(z)
 
 
+class AttentionBlock(nn.Module):
+    def __init__(self, ch, num_heads=4, groups=16):
+        super().__init__()
+        self.num_heads = num_heads
+        self.norm = nn.GroupNorm(groups, ch)
+        self.qkv = nn.Conv2d(ch, 3 * ch, 1)
+        self.proj = nn.Conv2d(ch, ch, 1)
+        nn.init.zeros_(self.proj.weight); nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x, t):
+        B, C, H, W = x.shape
+        qkv = self.qkv(self.norm(x)).reshape(B, 3, self.num_heads, C // self.num_heads, H * W)
+        q, k, v = (u.transpose(-1, -2) for u in qkv.unbind(1)) # (B, head, pix, d)
+        out = F.scaled_dot_product_attention(q, k, v) # (B, head, pix, d)
+        out = out.transpose(-1, -2).reshape(B, C, H, W) # (B, head * d, pix_h, pix_w)
+        return x + self.proj(out)
+
+
 class TimeEmbedding(nn.Module):
     def __init__(self, dim=64, scale=1000.0):
         super().__init__()
@@ -65,6 +83,13 @@ class TimeEmbedding(nn.Module):
         return torch.cat((torch.cos(t[:, None] * self.freqs), torch.sin(t[:, None] * self.freqs)), dim=1)
 
 
+class FMSequential(nn.Sequential):
+    def forward(self, x, t_emb):
+        for block in self:
+            x = block(x, t_emb)
+        return x
+
+    
 class UNet(nn.Module):
     def __init__(self, init_ch=32, emb_dim=256):
         super().__init__()
@@ -79,20 +104,44 @@ class UNet(nn.Module):
         self.conv_beg = nn.Conv2d(3, init_ch, kernel_size=3, stride=1, padding=1)
         
         self.res_down0 = ResBlock(init_ch, init_ch, emb_dim=emb_dim)
-        self.res_down1 = ResBlock(init_ch, init_ch*2, emb_dim=emb_dim, down=True)
-        self.res_down2 = ResBlock(init_ch*2, init_ch*4, emb_dim=emb_dim, down=True)
+        self.res_down1 = FMSequential(
+            ResBlock(init_ch, init_ch*2, emb_dim=emb_dim, down=True),
+            AttentionBlock(init_ch*2),
+            ResBlock(init_ch*2, init_ch*2, emb_dim=emb_dim),
+        )
+        self.res_down2 = FMSequential(
+            ResBlock(init_ch*2, init_ch*4, emb_dim=emb_dim, down=True),
+            AttentionBlock(init_ch*4),
+            ResBlock(init_ch*4, init_ch*4, emb_dim=emb_dim),
+        )
         self.res_down3 = ResBlock(init_ch*4, init_ch*8, emb_dim=emb_dim, down=True)
 
-        self.res_mid1 = ResBlock(init_ch*8, init_ch*8, emb_dim=emb_dim)
+        self.res_mid = FMSequential(
+            ResBlock(init_ch*8, init_ch*8, emb_dim=emb_dim),
+            AttentionBlock(init_ch*8),
+            ResBlock(init_ch*8, init_ch*8, emb_dim=emb_dim),
+        )
 
         self.res_up1 = ResBlock(init_ch*8, init_ch*4, emb_dim=emb_dim, up=True)
-        self.res_up2 = ResBlock(init_ch*8, init_ch*2, emb_dim=emb_dim, up=True)
-        self.res_up3 = ResBlock(init_ch*4, init_ch, emb_dim=emb_dim, up=True)
+        self.res_up2 = FMSequential(
+            ResBlock(init_ch*8, init_ch*4, emb_dim=emb_dim),
+            AttentionBlock(init_ch*4),
+            ResBlock(init_ch*4, init_ch*2, emb_dim=emb_dim, up=True),
+        )
+        self.res_up3 = FMSequential(
+            ResBlock(init_ch*4, init_ch*2, emb_dim=emb_dim),
+            AttentionBlock(init_ch*2),
+            ResBlock(init_ch*2, init_ch*1, emb_dim=emb_dim, up=True),
+        )
         self.res_up4 = ResBlock(init_ch*2, init_ch, emb_dim=emb_dim)
+
+        c = nn.Conv2d(init_ch, 3, kernel_size=3, stride=1, padding=1)
+        nn.init.zeros_(c.weight)
+        nn.init.zeros_(c.bias)
         self.conv_end = nn.Sequential(
             nn.GroupNorm(16, init_ch),
             nn.SiLU(),
-            nn.Conv2d(init_ch, 3, kernel_size=3, stride=1, padding=1)
+            c
         )
 
     def forward(self, x, t):
@@ -104,7 +153,7 @@ class UNet(nn.Module):
         x2 = self.res_down2(x1, t_embs)
         x3 = self.res_down3(x2, t_embs)
 
-        m = self.res_mid1(x3, t_embs)
+        m = self.res_mid(x3, t_embs)
 
         z3 = self.res_up1(m, t_embs)
         z2 = self.res_up2(torch.cat([z3, x2], dim=1), t_embs)
