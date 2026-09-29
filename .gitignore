@@ -13,3 +13,6 @@ docs/
 runs/**
 !runs/**/
 !runs/**/*.png
+
+
+m2/generated_images/

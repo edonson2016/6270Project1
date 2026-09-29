@@ -40,10 +40,13 @@ def calc_loss_tpc(x, model, device, config):
     xt_neg = t[:, None, None, None] * x0 + (1 - t[:, None, None, None]) * x
     ut = x - x0 
 
+    mask = (torch.rand(x0.shape[0], device=x0.device) < config.tpc.p_tpc).float()
     with torch.autocast(device.type, dtype=torch.bfloat16, enabled=config.training.autocast_bf16):
         v = model(torch.cat((xt, xt_neg)), torch.cat((t, 1-t)))
-        vt, vt_neg = torch.chunk(v, 2)
-    l = F.mse_loss(vt.float(), ut) + config.tpc.lambda_ * F.mse_loss(vt_neg.float(), vt.float())
+    vt, vt_neg = torch.chunk(v.float(), 2)
+
+    l_tpc = ((vt_neg - vt) ** 2).mean(dim=(1, 2, 3))
+    l = F.mse_loss(vt, ut) + config.tpc.lambda_ * (mask * l_tpc).mean()
     return l
 
 
@@ -106,8 +109,27 @@ def cubic_bezier(x0, x1, v0, v1, t):
     return x_t, v_t
 
 
-def gaussian_mixture():
-    ...
+def sample_gmm(n, means, covs, weights):
+    inds = torch.multinomial(weights, n, replacement=True)
+    return means[inds] + covs[inds].sqrt() * torch.randn_like(means[inds])
+
+
+def gaussian_mixture(x, model, device, config, means, covs, weights):
+    x0 = sample_gmm(x.shape[0], means, covs, weights).reshape(x.shape)
+
+    dists = torch.cdist(x0.flatten(1).float(), x.flatten(1).float()) ** 2
+    rows, cols = linear_sum_assignment(dists.cpu().numpy())
+    new_x0 = torch.empty_like(x0)
+    new_x0[cols] = x0[rows]
+
+    t = torch.rand(new_x0.shape[0], device=device)
+    xt = (1 - t[:, None, None, None]) * new_x0 + t[:, None, None, None] * x
+    ut = x - new_x0 
+    with torch.autocast(device.type, dtype=torch.bfloat16, enabled=config.training.autocast_bf16):
+        vt = model(xt, t)
+    return F.mse_loss(vt.float(), ut)
+
+    
 
 
 loss_method_dict = {
@@ -115,4 +137,6 @@ loss_method_dict = {
     "ot": calc_loss_ot,
     "tpc": calc_loss_tpc,
     "fdm": calc_loss_fdm,
+    "bezier": calc_loss_bezier,
+    "gmm": gaussian_mixture
 }

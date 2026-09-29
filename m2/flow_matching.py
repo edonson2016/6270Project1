@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 import torchvision
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
-from sklearn.mixture import GaussianMixture
+from sklearn.mixture import GaussianMixture # type: ignore
 
 from m2 import flow_matching_losses
 from m2.dataset import CifarDS
@@ -29,13 +29,13 @@ def pretrain_gmm(dl, config):
 
     gmm = GaussianMixture(
         n_components=config.gmm.components,
-        covariance_type='diag',
+        covariance_type=config.gmm.covariance_type,
         random_state=config.training.seed,
     )
     gmm.fit(X)
     return {
         'means': torch.from_numpy(gmm.means_).float(),
-        'vars': torch.from_numpy(gmm.covariances_).float(),
+        'covs': torch.from_numpy(gmm.covariances_).float(),
         'weights': torch.from_numpy(gmm.weights_).float(),
     }
 
@@ -48,7 +48,9 @@ def train_loop(
         opt: torch.optim.Optimizer,
         dl,
         device,
-        noise
+        noise,
+        i_tot_start=0,
+        **kwargs,
     ):
     n = 0
     loss_sum = torch.zeros((), device=device)
@@ -57,11 +59,11 @@ def train_loop(
     running_time = time.perf_counter()
 
     for i, (x, y) in enumerate(dl):
-        i_tot = i + epoch * len(dl)
+        i_tot = i + epoch * len(dl) + i_tot_start
         model.train()
 
         opt.zero_grad()
-        l = flow_matching_losses.loss_method_dict[config.loss.type](x, model, device, config)
+        l = flow_matching_losses.loss_method_dict[config.loss.type](x, model, device, config, **kwargs)
         l.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_gradient_norm)
         opt.step()
@@ -116,7 +118,8 @@ def train_loop(
                 "opt": opt.state_dict(),
                 "i_tot": i_tot,
                 "rng_cpu": torch.get_rng_state(),
-                "rng_cuda": torch.cuda.get_rng_state()
+                "rng_cuda": torch.cuda.get_rng_state(),
+                "gmm": {k: v.cpu() for k, v in kwargs.items()} if kwargs else None,
             }
             torch.save(ckpt, ckpt_path)
 
@@ -151,31 +154,56 @@ def train_fm(config_path, added_config_path=None):
 
     if config.model.name == 'UNet':
         model = UNet(init_ch=config.model.init_channels, emb_dim=config.model.t_embedding_dim)
+
+    if config.training.get("checkpoint_path") is not None:
+        ckpt = torch.load(config.training.checkpoint_path, map_location='cpu')
+    else:
+        ckpt = None
+
+    if ckpt is not None:
+        model.load_state_dict(ckpt['model'])
+
     if config.training.channels_last:
         model = model.to(device, memory_format=torch.channels_last)
     else:
         model = model.to(device)
+
     if config.training.use_ema:
         ema = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(config.training.ema_decay), use_buffers=True)
         ema.requires_grad_(False)
+        if ckpt is not None:
+            ema.module.load_state_dict(ckpt['ema'])
+            ema.n_averaged.fill_(1)
     else:
         ema = None
-    
+
     if config.training.compile:
         model.compile()
-    noise = torch.randn(config.training.log_image_num, 3, 32, 32, device=device)
+
+    gmm = {}
+    if config.loss.type == 'gmm':
+        gmm = ckpt['gmm'] if ckpt is not None else pretrain_gmm(dl, config)
+        gmm = {k: v.to(device) for k, v in gmm.items()}
+        noise = flow_matching_losses.sample_gmm(config.training.log_image_num, **gmm).reshape(-1, 3, 32, 32)
+    else:
+        noise = torch.randn(config.training.log_image_num, 3, 32, 32, device=device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=config.training.lr, weight_decay=config.training.weight_decay)
-
+    if ckpt is not None:
+        opt.load_state_dict(ckpt['opt'])
+        i_tot_start = ckpt['i_tot']
+    else:
+        i_tot_start = 0
+    
     for i in range(config.training.epochs):
-        train_loop(i, config, model, ema, opt, dl, device, noise)
+        train_loop(i, config, model, ema, opt, dl, device, noise, i_tot_start=i_tot_start, **gmm)
     wandb.finish()
 
 
 
 
 if __name__ == '__main__':
-    train_fm('./m2/configs/base_train_fm.yaml')
+    train_fm('./m2/configs/base_fm.yaml')
 
 
 

@@ -1,5 +1,20 @@
+name: "fm_tpc_lambda1"
+
+
+
 training:
+  epochs: 26
+  # checkpoint_path: './m2/checkpoints/fm_tpc/ckpt_10000.pt' # Continuing to 50 epochs
   batch_size: 128 # Gets doubled by the xt_neg samples
 
+
+loss:
+  type: "tpc"
+
 tpc:
-  lambda_: 0.25
+  lambda_: 0.1
+  p_tpc: 0.75
+
+eval: 
+  checkpoint_step: 10000
+  sample_steps: 50

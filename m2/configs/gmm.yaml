@@ -6,3 +6,4 @@ loss:
 gmm:
   components: 10
   num_fit_samples: 20000
+  covariance_type: 'diag'

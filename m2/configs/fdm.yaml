@@ -1,8 +1,0 @@
-name: "fdm"
-
-loss:
-  type: "fdm"
-
-fdm:
-  lambda_: 0.1
-  num_div_samples: 32 # divergence term runs in fp32 on this many samples per batch

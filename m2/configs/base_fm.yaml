@@ -15,7 +15,7 @@ training:
   batch_size: 256
   lr: 1e-4
   weight_decay: 0.0
-  epochs: 50
+  epochs: 51
   max_gradient_norm: 0.5
 
   channels_last: True
@@ -40,3 +40,4 @@ eval:
 
 paths:
   checkpoint_dir: './m2/checkpoints'
+  eval_save_dir: './m2/generated_images'
