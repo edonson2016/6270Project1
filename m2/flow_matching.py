@@ -11,9 +11,10 @@ from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 import torchvision
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from sklearn.mixture import GaussianMixture # type: ignore
+from sklearn.decomposition import PCA
 
 from m2 import flow_matching_losses
-from m2.dataset import CifarDS
+from m2.dataset import CifarDS, ImageFolderDS
 from m2.model import UNet
 from m2.flow_matching_eval import eval_samples
 
@@ -26,6 +27,31 @@ def pretrain_gmm(dl, config):
         if n >= config.gmm.num_fit_samples:
             break
     X = torch.cat(xs)[:config.gmm.num_fit_samples].numpy()
+
+    if config.gmm.covariance_type == 'pca_full':
+        pca = PCA(n_components=config.gmm.pca_dim, random_state=config.training.seed)
+        Z = pca.fit_transform(X)
+        print(f"PCA explained variance: {pca.explained_variance_ratio_.sum():.3f}")
+
+        gmm = GaussianMixture(
+            n_components=config.gmm.components,
+            covariance_type='full',
+            reg_covar=config.gmm.get('reg_covar', 1e-3),
+            max_iter=500,
+            random_state=config.training.seed,
+        ).fit(Z)
+        if not gmm.converged_:
+            print("Warning: GMM did not converge")
+
+        covs = torch.from_numpy(gmm.covariances_).float()
+        return {
+            'means': torch.from_numpy(gmm.means_).float(),  # (K, d)
+            'covs': torch.linalg.cholesky(covs),  # Cholesky factors L, cov = L L^T
+            'weights': torch.from_numpy(gmm.weights_).float(),
+            'pca_mean': torch.from_numpy(pca.mean_).float(),  # (3072,)
+            'pca_U': torch.from_numpy(pca.components_).float(),  # (d, 3072), orthonormal rows
+            'res_std': torch.tensor(pca.noise_variance_).float().sqrt(),  # std of discarded directions
+        }
 
     gmm = GaussianMixture(
         n_components=config.gmm.components,
@@ -63,7 +89,10 @@ def train_loop(
         model.train()
 
         opt.zero_grad()
-        l = flow_matching_losses.loss_method_dict[config.loss.type](x, model, device, config, **kwargs)
+        if config.loss.type == 'rectified':
+            l = flow_matching_losses.calc_loss_rectified(x, model, device, config, rectified_noise=y)
+        else:
+            l = flow_matching_losses.loss_method_dict[config.loss.type](x, model, device, config, **kwargs)
         l.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_gradient_norm)
         opt.step()
@@ -149,8 +178,12 @@ def train_fm(config_path, added_config_path=None):
     torch.manual_seed(config.training.seed)
 
     # Create data, model, opt
-    a = CifarDS(train=True, flip=config.data.flip, device=device, channels_last=config.training.channels_last)
+    if config.data.get("base_dir") is None:
+        a = CifarDS(train=True, flip=config.data.flip, device=device, channels_last=config.training.channels_last)
+    else:
+        a = ImageFolderDS(config.data.base_dir, device=device, channels_last=config.training.channels_last)
     dl = DataLoader(a, sampler=BatchSampler(RandomSampler(a), batch_size=config.training.batch_size, drop_last=True), batch_size=None)
+
 
     if config.model.name == 'UNet':
         model = UNet(init_ch=config.model.init_channels, emb_dim=config.model.t_embedding_dim)
@@ -161,7 +194,10 @@ def train_fm(config_path, added_config_path=None):
         ckpt = None
 
     if ckpt is not None:
-        model.load_state_dict(ckpt['model'])
+        if config.loss.type == "rectified":
+            model.load_state_dict(ckpt['ema'])
+        else:
+            model.load_state_dict(ckpt['model'])
 
     if config.training.channels_last:
         model = model.to(device, memory_format=torch.channels_last)
@@ -180,11 +216,12 @@ def train_fm(config_path, added_config_path=None):
     if config.training.compile:
         model.compile()
 
-    gmm = {}
+    kwargs = {}
     if config.loss.type == 'gmm':
         gmm = ckpt['gmm'] if ckpt is not None else pretrain_gmm(dl, config)
         gmm = {k: v.to(device) for k, v in gmm.items()}
         noise = flow_matching_losses.sample_gmm(config.training.log_image_num, **gmm).reshape(-1, 3, 32, 32)
+        kwargs = gmm
     else:
         noise = torch.randn(config.training.log_image_num, 3, 32, 32, device=device)
 
@@ -196,7 +233,7 @@ def train_fm(config_path, added_config_path=None):
         i_tot_start = 0
     
     for i in range(config.training.epochs):
-        train_loop(i, config, model, ema, opt, dl, device, noise, i_tot_start=i_tot_start, **gmm)
+        train_loop(i, config, model, ema, opt, dl, device, noise, i_tot_start=i_tot_start, **kwargs)
     wandb.finish()
 
 

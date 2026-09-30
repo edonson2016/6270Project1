@@ -17,4 +17,3 @@ tpc:
 
 eval: 
   checkpoint_step: 10000
-  sample_steps: 50

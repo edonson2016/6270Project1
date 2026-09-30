@@ -2,3 +2,6 @@ name: "fm_ot"
 
 loss:
   type: "ot"
+
+eval:
+  checkpoint_step: 9500

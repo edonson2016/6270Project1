@@ -95,7 +95,7 @@ def eval_fm(config_path, added_config_path=None):
     save_dir.mkdir(parents=True, exist_ok=True)
     if (save_dir / f'img_{config.eval.num_gen - 1}.png').exists():
         new_save_dir = save_dir.parent / '_temp'
-        shutil.rmtree()
+        shutil.rmtree(new_save_dir, ignore_errors=True)
         new_save_dir.mkdir(parents=True, exist_ok=False)
         for i in range(config.eval.num_gen):
             shutil.copy(save_dir / f"img_{i}.png", new_save_dir / f"img_{i}.png")

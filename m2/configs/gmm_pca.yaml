@@ -1,0 +1,14 @@
+name: "fm_gmm_pca"
+
+loss:
+  type: "gmm"
+
+# training: 
+  # checkpoint_path: './m2/checkpoints/fm_gmm/ckpt_2500.pt' # Continuing to 50 epochs
+
+gmm:
+  components: 20
+  num_fit_samples: 50000
+  covariance_type: 'pca_full'
+  pca_dim: 128
+  reg_covar: 1e-3

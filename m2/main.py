@@ -20,6 +20,7 @@ def model_type_to_runnable(model_type, train=True):
         case "ot": run_fm('./m2/configs/base_fm.yaml', "./m2/configs/ot.yaml")
         case "tpc": run_fm('./m2/configs/base_fm.yaml', "./m2/configs/tpc.yaml")
         case "gmm": run_fm('./m2/configs/base_fm.yaml', "./m2/configs/gmm.yaml")
+        case "rectified": run_fm('./m2/configs/base_fm.yaml', "./m2/configs/rectified.yaml")
 
 
 if __name__ == '__main__':

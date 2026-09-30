@@ -36,7 +36,7 @@ eval:
   num_gen: 50000
   batch_size: 256
   checkpoint_step: 10000
-  sample_steps: 50
+  sample_steps: 10
 
 paths:
   checkpoint_dir: './m2/checkpoints'

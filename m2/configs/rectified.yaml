@@ -1,0 +1,14 @@
+name: "fm_rectified"
+
+training:
+  checkpoint_path: './m2/checkpoints/fm_ot/ckpt_9500.pt' 
+  epochs: 6
+
+data: 
+  base_dir: './m2/generated_images/fm_ot'
+
+loss:
+  type: "rectified"
+
+eval:
+  checkpoint_step: 10500

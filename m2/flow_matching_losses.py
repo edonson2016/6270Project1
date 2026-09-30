@@ -109,9 +109,17 @@ def cubic_bezier(x0, x1, v0, v1, t):
     return x_t, v_t
 
 
-def sample_gmm(n, means, covs, weights):
+def sample_gmm(n, means, covs, weights, pca_mean=None, pca_U=None, res_std=None):
     inds = torch.multinomial(weights, n, replacement=True)
-    return means[inds] + covs[inds].sqrt() * torch.randn_like(means[inds])
+    if pca_U is None:  # diag GMM in pixel space
+        return means[inds] + covs[inds].sqrt() * torch.randn_like(means[inds])
+
+    # Full GMM in PCA space (covs are Cholesky factors), plus isotropic noise on the discarded directions
+    eps_z = torch.randn(n, means.shape[1], 1, device=means.device)
+    z = means[inds] + (covs[inds] @ eps_z).squeeze(-1)
+    eps = torch.randn(n, pca_U.shape[1], device=means.device)
+    eps_perp = eps - (eps @ pca_U.T) @ pca_U
+    return pca_mean + z @ pca_U + res_std * eps_perp
 
 
 def gaussian_mixture(x, model, device, config, means, covs, weights):
@@ -129,7 +137,15 @@ def gaussian_mixture(x, model, device, config, means, covs, weights):
         vt = model(xt, t)
     return F.mse_loss(vt.float(), ut)
 
-    
+
+def calc_loss_rectified(x, model, device, config, rectified_noise):
+    x0 = rectified_noise
+    t = torch.rand(x0.shape[0], device=x0.device)
+    xt = (1 - t[:, None, None, None]) * x0 + t[:, None, None, None] * x
+    ut = x - x0 
+    with torch.autocast(device.type, dtype=torch.bfloat16, enabled=config.training.autocast_bf16):
+        vt = model(xt, t)
+    return F.mse_loss(vt.float(), ut)
 
 
 loss_method_dict = {
@@ -138,5 +154,6 @@ loss_method_dict = {
     "tpc": calc_loss_tpc,
     "fdm": calc_loss_fdm,
     "bezier": calc_loss_bezier,
-    "gmm": gaussian_mixture
+    "gmm": gaussian_mixture,
+    "rectified": calc_loss_rectified,
 }

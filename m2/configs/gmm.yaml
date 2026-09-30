@@ -3,6 +3,9 @@ name: "fm_gmm"
 loss:
   type: "gmm"
 
+training: 
+  checkpoint_path: './m2/checkpoints/fm_gmm/ckpt_2500.pt' # Continuing to 50 epochs
+
 gmm:
   components: 10
   num_fit_samples: 20000
